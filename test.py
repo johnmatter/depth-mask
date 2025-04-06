@@ -4,9 +4,16 @@ import coremltools as ct
 import PIL.Image
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QHBoxLayout, QLabel, QSlider, QCheckBox, QPushButton)
+                            QHBoxLayout, QLabel, QSlider, QCheckBox, QPushButton, QSizePolicy,
+                            QColorDialog)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor, QPen
+
+# Download the model from Hugging Face
+# https://huggingface.co/apple/coreml-depth-anything-v2-small
+# huggingface-cli download \
+#   --local-dir models --local-dir-use-symlinks False \
+#   apple/coreml-depth-anything-v2-small
 
 class DepthCameraApp(QMainWindow):
     def __init__(self):
@@ -15,6 +22,10 @@ class DepthCameraApp(QMainWindow):
         # Initialize variables
         self.threshold = 50
         self.mirror_enabled = True
+        self.show_all_panels = True
+        self.normal_geometry = None
+        self.green_screen_color = QColor(0, 0, 0)
+        self.green_screen_mode = True
         
         # Set up the UI
         self.setWindowTitle("Depth Camera")
@@ -25,10 +36,10 @@ class DepthCameraApp(QMainWindow):
         self.setCentralWidget(central_widget)
         
         # Main layout
-        main_layout = QVBoxLayout(central_widget)
+        self.main_layout = QVBoxLayout(central_widget)
         
         # Controls layout
-        controls_layout = QHBoxLayout()
+        self.controls_layout = QHBoxLayout()
         
         # Threshold slider
         threshold_label = QLabel("Threshold:")
@@ -47,19 +58,35 @@ class DepthCameraApp(QMainWindow):
         self.mirror_toggle.setChecked(self.mirror_enabled)
         self.mirror_toggle.stateChanged.connect(self.toggle_mirror)
         
+        # Green screen mode toggle
+        self.green_screen_toggle = QCheckBox("Green Screen")
+        self.green_screen_toggle.setStyleSheet("font-family: Arial; font-size: 14px; font-weight: bold;")
+        self.green_screen_toggle.setChecked(self.green_screen_mode)
+        self.green_screen_toggle.stateChanged.connect(self.toggle_green_screen)
+        
+        # Color picker button
+        self.color_button = QPushButton("Select Color")
+        self.color_button.setStyleSheet("font-family: Arial; font-size: 14px; font-weight: bold;")
+        self.color_button.clicked.connect(self.choose_color)
+        
+        # Set initial color button background
+        self.update_color_button()
+        
         # Add controls to layout
-        controls_layout.addWidget(threshold_label)
-        controls_layout.addWidget(self.threshold_slider)
-        controls_layout.addWidget(self.threshold_value_label)
-        controls_layout.addWidget(self.mirror_toggle)
+        self.controls_layout.addWidget(threshold_label)
+        self.controls_layout.addWidget(self.threshold_slider)
+        self.controls_layout.addWidget(self.threshold_value_label)
+        self.controls_layout.addWidget(self.mirror_toggle)
+        self.controls_layout.addWidget(self.green_screen_toggle)
+        self.controls_layout.addWidget(self.color_button)
         
         # Display label for the camera feed
         self.display_label = QLabel()
         self.display_label.setAlignment(Qt.AlignCenter)
         
         # Add widgets to main layout
-        main_layout.addLayout(controls_layout)
-        main_layout.addWidget(self.display_label)
+        self.main_layout.addLayout(self.controls_layout)
+        self.main_layout.addWidget(self.display_label)
         
         # Load Core ML model
         self.model_path = "models/DepthAnythingV2SmallF16.mlpackage"
@@ -74,6 +101,95 @@ class DepthCameraApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(33)  # Update at approximately 30 FPS
+        
+        # Store initial window size
+        self.clean_view_size = (900, 700)  # Default size for clean view
+    
+    def update_color_button(self):
+        """Update the color button's background to show the current color"""
+        color = self.green_screen_color
+        style = f"background-color: rgb({color.red()}, {color.green()}, {color.blue()}); "
+        
+        # Adjust text color for better contrast
+        if color.lightness() > 128:
+            style += "color: black; "
+        else:
+            style += "color: white; "
+        
+        style += "font-family: Arial; font-size: 14px; font-weight: bold;"
+        self.color_button.setStyleSheet(style)
+    
+    def choose_color(self):
+        """Open color picker dialog and update the green screen color"""
+        color = QColorDialog.getColor(self.green_screen_color, self, "Select Green Screen Color")
+        if color.isValid():
+            self.green_screen_color = color
+            self.update_color_button()
+    
+    def toggle_green_screen(self, state):
+        """Toggle between green screen and transparency modes"""
+        self.green_screen_mode = (state == Qt.Checked)
+    
+    def keyPressEvent(self, event):
+        # Toggle view mode when spacebar is pressed
+        if event.key() == Qt.Key_Space:
+            self.show_all_panels = not self.show_all_panels
+            self.toggle_view_mode()
+        # Allow Escape key to exit fullscreen mode
+        elif event.key() == Qt.Key_Escape and not self.show_all_panels:
+            self.show_all_panels = True
+            self.toggle_view_mode()
+        
+        # Pass event to parent class for default handling of other keys
+        super().keyPressEvent(event)
+    
+    def toggle_view_mode(self):
+        if self.show_all_panels:
+            # Switch to normal view
+            # Restore window decorations
+            self.setWindowFlags(Qt.Window)
+            # Show controls
+            for i in range(self.controls_layout.count()):
+                item = self.controls_layout.itemAt(i)
+                if item.widget():
+                    item.widget().show()
+            # Set normal layout margins
+            self.main_layout.setContentsMargins(11, 11, 11, 11)
+            # Restore window title
+            self.setWindowTitle("Depth Camera")
+            # Restore normal geometry if we have it stored
+            if self.normal_geometry:
+                self.setGeometry(self.normal_geometry)
+            else:
+                self.setGeometry(100, 100, 900, 700)
+            
+            # Allow the display label to resize with contents in normal mode
+            self.display_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+        else:
+            # Switch to clean view
+            # Store current geometry before switching
+            self.normal_geometry = self.geometry()
+            # Store fixed size for clean view
+            self.clean_view_size = (self.width(), self.height())
+            # Remove window decorations
+            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            # Hide controls
+            for i in range(self.controls_layout.count()):
+                item = self.controls_layout.itemAt(i)
+                if item.widget():
+                    item.widget().hide()
+            # Remove layout margins
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
+            # Clear window title
+            self.setWindowTitle("")
+            
+            # Fix the size policy to prevent auto-resizing
+            self.display_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.display_label.setFixedSize(self.clean_view_size[0], self.clean_view_size[1])
+        
+        # Need to show window again after changing flags
+        self.show()
     
     def update_threshold(self, value):
         self.threshold = value
@@ -126,59 +242,105 @@ class DepthCameraApp(QMainWindow):
         # Resize alpha mask to match original frame dimensions
         alpha_mask_resized = cv2.resize(alpha_mask, (frame_width, frame_height))
         
-        # Apply the alpha mask to the original frame
-        frame_with_mask = cv2.bitwise_and(frame, frame, mask=alpha_mask_resized)
+        # Create the masked frame
+        if self.green_screen_mode:
+            # Create a solid color image for green screen
+            # Use pure BGR values for OBS compatibility
+            color_bgr = (
+                self.green_screen_color.blue(),
+                self.green_screen_color.green(), 
+                self.green_screen_color.red()
+            )
+            
+            # IMPORTANT: Invert the mask - we want the BACKGROUND to be green, not the subject
+            # The depth model gives us a mask where subject is white (255) and background is black (0)
+            # We need to invert this for proper chroma keying
+            inv_mask_resized = 255 - alpha_mask_resized
+            
+            # Apply slight blur to mask to reduce edge artifacts
+            mask_smoothed = cv2.GaussianBlur(inv_mask_resized, (5, 5), 0)
+            
+            # Convert to 3-channel for blending (scaled to 0.0-1.0)
+            mask_3ch = cv2.cvtColor(mask_smoothed, cv2.COLOR_GRAY2BGR) / 255.0
+            
+            # Create the green screen backdrop
+            green_screen = np.full_like(frame, color_bgr, dtype=np.uint8)
+            
+            # Blend original frame with green screen based on mask
+            # This puts the green color in the BACKGROUND (where mask is 1.0)
+            # and keeps the subject's original colors (where mask is 0.0)
+            frame_with_mask = cv2.multiply(1.0 - mask_3ch, frame.astype(float)).astype(np.uint8) + \
+                              cv2.multiply(mask_3ch, green_screen.astype(float)).astype(np.uint8)
+        else:
+            # Apply the alpha mask to the original frame (original transparency mode)
+            frame_with_mask = cv2.bitwise_and(frame, frame, mask=alpha_mask_resized)
         
         # Define a common size for all display images
         display_size = (400, 300)
         
-        # Resize all images to the common display size
-        display_original = cv2.resize(frame, display_size)
+        # Display based on the current view mode
+        if self.show_all_panels:
+            # Resize all images to the common display size
+            display_original = cv2.resize(frame, display_size)
+            
+            # Convert depth map to BGR for display
+            depth_color = cv2.cvtColor(depth_map_visualization, cv2.COLOR_GRAY2BGR)
+            display_depth = cv2.resize(depth_color, display_size)
+            
+            # Convert alpha mask to BGR for display
+            alpha_color = cv2.cvtColor(alpha_mask, cv2.COLOR_GRAY2BGR)
+            display_alpha = cv2.resize(alpha_color, display_size)
+            
+            # Resize masked frame
+            display_masked = cv2.resize(frame_with_mask, display_size)
+            
+            # Create a 2x2 grid
+            top_row = np.hstack((display_original, display_depth))
+            bottom_row = np.hstack((display_alpha, display_masked))
+            combined_display = np.vstack((top_row, bottom_row))
+            
+            # Convert OpenCV image to QImage for display in PyQt
+            h, w, c = combined_display.shape
+            bytes_per_line = c * w
+            qt_image = QImage(combined_display.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            
+            # Create a pixmap from the QImage
+            pixmap = QPixmap.fromImage(qt_image)
+            
+            # Create a painter to draw on the pixmap
+            painter = QPainter(pixmap)
+            
+            # Set up font and color for text
+            font = QFont("Arial", 16, QFont.Bold)
+            painter.setFont(font)
+            painter.setPen(QPen(QColor(0, 200, 0)))
+            
+            # Draw labels on each quadrant
+            labels = ["Original", "Depth Map", "Alpha Mask", "Masked Result"]
+            positions = [(20, 30), (display_size[0] + 20, 30), 
+                        (20, display_size[1] + 30), (display_size[0] + 20, display_size[1] + 30)]
+            
+            for label, pos in zip(labels, positions):
+                painter.drawText(pos[0], pos[1], label)
+            
+            # End painting
+            painter.end()
+        else:
+            # Show only the masked output in full window size
+            # Use the fixed size we stored for clean view
+            display_masked = cv2.resize(frame_with_mask, (self.clean_view_size[0], self.clean_view_size[1]))
+            
+            # Convert OpenCV image to QImage for display in PyQt
+            h, w, c = display_masked.shape
+            bytes_per_line = c * w
+            qt_image = QImage(display_masked.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            
+            # Create a pixmap from the QImage
+            pixmap = QPixmap.fromImage(qt_image)
+            
+            # No text or UI elements in clean mode - just the image
         
-        # Convert depth map to BGR for display
-        depth_color = cv2.cvtColor(depth_map_visualization, cv2.COLOR_GRAY2BGR)
-        display_depth = cv2.resize(depth_color, display_size)
-        
-        # Convert alpha mask to BGR for display
-        alpha_color = cv2.cvtColor(alpha_mask, cv2.COLOR_GRAY2BGR)
-        display_alpha = cv2.resize(alpha_color, display_size)
-        
-        # Resize masked frame
-        display_masked = cv2.resize(frame_with_mask, display_size)
-        
-        # Create a 2x2 grid
-        top_row = np.hstack((display_original, display_depth))
-        bottom_row = np.hstack((display_alpha, display_masked))
-        combined_display = np.vstack((top_row, bottom_row))
-        
-        # Convert OpenCV image to QImage for display in PyQt
-        h, w, c = combined_display.shape
-        bytes_per_line = c * w
-        qt_image = QImage(combined_display.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
-        
-        # Create a pixmap from the QImage
-        pixmap = QPixmap.fromImage(qt_image)
-        
-        # Create a painter to draw on the pixmap
-        painter = QPainter(pixmap)
-        
-        # Set up font and color for text
-        font = QFont("Arial", 16, QFont.Bold)
-        painter.setFont(font)
-        painter.setPen(QPen(QColor(0, 200, 0)))
-        
-        # Draw labels on each quadrant
-        labels = ["Original", "Depth Map", "Alpha Mask", "Masked Result"]
-        positions = [(20, 30), (display_size[0] + 20, 30), 
-                    (20, display_size[1] + 30), (display_size[0] + 20, display_size[1] + 30)]
-        
-        for label, pos in zip(labels, positions):
-            painter.drawText(pos[0], pos[1], label)
-        
-        # End painting
-        painter.end()
-        
-        # Display the combined image
+        # Display the image
         self.display_label.setPixmap(pixmap)
     
     def closeEvent(self, event):
