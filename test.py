@@ -3,6 +3,7 @@ import numpy as np
 import coremltools as ct
 import PIL.Image
 import sys
+import mediapipe as mp
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QSlider, QCheckBox, QPushButton, QSizePolicy,
                             QColorDialog)
@@ -26,6 +27,8 @@ class DepthCameraApp(QMainWindow):
         self.normal_geometry = None
         self.green_screen_color = QColor(0, 0, 0)
         self.green_screen_mode = True
+        self.use_pose_refinement = True  # Enable pose refinement
+        self.show_pose_overlay = True    # Show pose landmarks
         
         # Set up the UI
         self.setWindowTitle("Depth Camera")
@@ -64,6 +67,18 @@ class DepthCameraApp(QMainWindow):
         self.green_screen_toggle.setChecked(self.green_screen_mode)
         self.green_screen_toggle.stateChanged.connect(self.toggle_green_screen)
         
+        # Pose refinement toggle
+        self.pose_toggle = QCheckBox("Pose Refinement")
+        self.pose_toggle.setStyleSheet("font-family: Arial; font-size: 14px; font-weight: bold;")
+        self.pose_toggle.setChecked(self.use_pose_refinement)
+        self.pose_toggle.stateChanged.connect(self.toggle_pose_refinement)
+        
+        # Pose overlay toggle
+        self.pose_overlay_toggle = QCheckBox("Show Pose")
+        self.pose_overlay_toggle.setStyleSheet("font-family: Arial; font-size: 14px; font-weight: bold;")
+        self.pose_overlay_toggle.setChecked(self.show_pose_overlay)
+        self.pose_overlay_toggle.stateChanged.connect(self.toggle_pose_overlay)
+        
         # Color picker button
         self.color_button = QPushButton("Select Color")
         self.color_button.setStyleSheet("font-family: Arial; font-size: 14px; font-weight: bold;")
@@ -78,6 +93,8 @@ class DepthCameraApp(QMainWindow):
         self.controls_layout.addWidget(self.threshold_value_label)
         self.controls_layout.addWidget(self.mirror_toggle)
         self.controls_layout.addWidget(self.green_screen_toggle)
+        self.controls_layout.addWidget(self.pose_toggle)
+        self.controls_layout.addWidget(self.pose_overlay_toggle)
         self.controls_layout.addWidget(self.color_button)
         
         # Display label for the camera feed
@@ -91,6 +108,18 @@ class DepthCameraApp(QMainWindow):
         # Load Core ML model
         self.model_path = "models/DepthAnythingV2SmallF16.mlpackage"
         self.model = ct.models.MLModel(self.model_path)
+        
+        # Initialize MediaPipe Pose
+        self.mp_pose = mp.solutions.pose
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=True,  # Important: generates segmentation mask
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
         
         # Initialize webcam
         self.cap = cv2.VideoCapture(0)
@@ -129,6 +158,14 @@ class DepthCameraApp(QMainWindow):
     def toggle_green_screen(self, state):
         """Toggle between green screen and transparency modes"""
         self.green_screen_mode = (state == Qt.Checked)
+    
+    def toggle_pose_refinement(self, state):
+        """Toggle pose refinement"""
+        self.use_pose_refinement = (state == Qt.Checked)
+    
+    def toggle_pose_overlay(self, state):
+        """Toggle pose overlay display"""
+        self.show_pose_overlay = (state == Qt.Checked)
     
     def keyPressEvent(self, event):
         # Toggle view mode when spacebar is pressed
@@ -210,7 +247,33 @@ class DepthCameraApp(QMainWindow):
         # Get original frame dimensions
         frame_height, frame_width = frame.shape[:2]
         
-        # Resize to the model's expected input size
+        # Copy original frame for pose detection
+        rgb_frame_full = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process with MediaPipe Pose
+        pose_results = None
+        pose_mask = None
+        if self.use_pose_refinement:
+            pose_results = self.pose.process(rgb_frame_full)
+            
+            # If pose was detected, create a mask from segmentation
+            if pose_results.segmentation_mask is not None:
+                # Get the segmentation mask from MediaPipe
+                pose_mask = pose_results.segmentation_mask
+                
+                # Resize to match frame dimensions
+                pose_mask = cv2.resize(
+                    pose_mask, 
+                    (frame_width, frame_height)
+                )
+                
+                # Threshold and convert to binary mask
+                _, pose_mask = cv2.threshold(
+                    (pose_mask * 255).astype(np.uint8),
+                    127, 255, cv2.THRESH_BINARY
+                )
+        
+        # Resize to the model's expected input size for depth estimation
         # Core ML model expects exactly 518×392
         resized_frame = cv2.resize(frame, (518, 392))
         
@@ -242,6 +305,22 @@ class DepthCameraApp(QMainWindow):
         # Resize alpha mask to match original frame dimensions
         alpha_mask_resized = cv2.resize(alpha_mask, (frame_width, frame_height))
         
+        # Combine depth and pose masks if available
+        final_mask = alpha_mask_resized
+        
+        if self.use_pose_refinement and pose_mask is not None:
+            # Combine the masks:
+            # 1. Start with depth mask
+            # 2. Refine with pose segmentation mask
+            
+            # Use logical OR to combine the masks
+            final_mask = cv2.bitwise_or(alpha_mask_resized, pose_mask)
+            
+            # Apply morphological operations to clean up the mask
+            kernel = np.ones((5, 5), np.uint8)
+            final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, kernel)
+            final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
+        
         # Create the masked frame
         if self.green_screen_mode:
             # Create a solid color image for green screen
@@ -255,7 +334,7 @@ class DepthCameraApp(QMainWindow):
             # IMPORTANT: Invert the mask - we want the BACKGROUND to be green, not the subject
             # The depth model gives us a mask where subject is white (255) and background is black (0)
             # We need to invert this for proper chroma keying
-            inv_mask_resized = 255 - alpha_mask_resized
+            inv_mask_resized = 255 - final_mask
             
             # Apply slight blur to mask to reduce edge artifacts
             mask_smoothed = cv2.GaussianBlur(inv_mask_resized, (5, 5), 0)
@@ -270,10 +349,21 @@ class DepthCameraApp(QMainWindow):
             # This puts the green color in the BACKGROUND (where mask is 1.0)
             # and keeps the subject's original colors (where mask is 0.0)
             frame_with_mask = cv2.multiply(1.0 - mask_3ch, frame.astype(float)).astype(np.uint8) + \
-                              cv2.multiply(mask_3ch, green_screen.astype(float)).astype(np.uint8)
+                               cv2.multiply(mask_3ch, green_screen.astype(float)).astype(np.uint8)
         else:
             # Apply the alpha mask to the original frame (original transparency mode)
-            frame_with_mask = cv2.bitwise_and(frame, frame, mask=alpha_mask_resized)
+            frame_with_mask = cv2.bitwise_and(frame, frame, mask=final_mask)
+        
+        # Draw pose landmarks if enabled
+        if self.show_pose_overlay and pose_results and pose_results.pose_landmarks:
+            frame_with_landmarks = frame_with_mask.copy()
+            self.mp_drawing.draw_landmarks(
+                frame_with_landmarks,
+                pose_results.pose_landmarks,
+                self.mp_pose.POSE_CONNECTIONS,
+                landmark_drawing_spec=self.mp_drawing_styles.get_default_pose_landmarks_style()
+            )
+            frame_with_mask = frame_with_landmarks
         
         # Define a common size for all display images
         display_size = (400, 300)
@@ -288,7 +378,7 @@ class DepthCameraApp(QMainWindow):
             display_depth = cv2.resize(depth_color, display_size)
             
             # Convert alpha mask to BGR for display
-            alpha_color = cv2.cvtColor(alpha_mask, cv2.COLOR_GRAY2BGR)
+            alpha_color = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
             display_alpha = cv2.resize(alpha_color, display_size)
             
             # Resize masked frame
@@ -316,7 +406,7 @@ class DepthCameraApp(QMainWindow):
             painter.setPen(QPen(QColor(0, 200, 0)))
             
             # Draw labels on each quadrant
-            labels = ["Original", "Depth Map", "Alpha Mask", "Masked Result"]
+            labels = ["Original", "Depth Map", "Combined Mask", "Masked Result"]
             positions = [(20, 30), (display_size[0] + 20, 30), 
                         (20, display_size[1] + 30), (display_size[0] + 20, display_size[1] + 30)]
             
@@ -345,6 +435,7 @@ class DepthCameraApp(QMainWindow):
     
     def closeEvent(self, event):
         self.cap.release()
+        self.pose.close()
         event.accept()
 
 if __name__ == "__main__":
