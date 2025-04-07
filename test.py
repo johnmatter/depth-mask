@@ -10,6 +10,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor, QPen
 
+# Looks like pyvirtualcam is not working with OBS Studio on macOS for the time being
+# https://github.com/letmaik/pyvirtualcam/issues/111#issuecomment-1763398540
+# https://github.com/obsproject/obs-studio/issues/9680#issuecomment-1765758754
+
 # Download the model from Hugging Face
 # https://huggingface.co/apple/coreml-depth-anything-v2-small
 # huggingface-cli download \
